@@ -1,69 +1,79 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-
-// THE OPEN DOOR CORS
 const io = new Server(server, {
-  cors: {
-    origin: "*", 
-    methods: ["GET", "POST"]
-  }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 app.use(express.static('public'));
 
-let rooms = {}; // Database to store room info
+let rooms = {}; 
 
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
-
   // 1. CREATE ROOM
-  socket.on('create-room', ({ password, animeId }) => {
+  socket.on('create-room', ({ password, username }) => {
     const roomId = Math.random().toString(36).substring(2, 7);
-    rooms[roomId] = { hostId: socket.id, password, animeId };
+    rooms[roomId] = { 
+      hostId: socket.id, 
+      password, 
+      hostName: username,
+      chatHistory: [] // <--- ALL MESSAGES STORED HERE
+    };
     socket.join(roomId);
-    socket.emit('room-created', { roomId, password });
+    socket.emit('room-created', { roomId, username });
   });
 
-  // 2. JOIN ROOM
-  socket.on('join-room', ({ roomId, password }) => {
+  // 2. JOIN ROOM (Now sends history to newcomer)
+  socket.on('join-room', ({ roomId, password, username }) => {
     const room = rooms[roomId];
     if (room && room.password === password) {
       socket.join(roomId);
-      socket.emit('joined-successfully', { animeId: room.animeId });
+      // Send the WHOLE history to the person who just joined
+      socket.emit('joined-successfully', { 
+        roomId, 
+        username, 
+        hostName: room.hostName,
+        history: room.chatHistory 
+      });
+      
+      const joinMsg = { username: "System", msg: `${username} joined!` };
+      room.chatHistory.push(joinMsg);
+      io.to(roomId).emit('new-msg', joinMsg);
     } else {
       socket.emit('error-msg', 'Invalid ID or Password');
     }
   });
 
-  // 3. HOST COMMANDS (Sync, Play, Pause)
-  socket.on('host-command', ({ roomId, action, time }) => {
+  // 3. HOST COMMANDS
+  socket.on('host-command', ({ roomId, action, time, url }) => {
     const room = rooms[roomId];
     if (room && socket.id === room.hostId) {
-      // Broadcast to everyone in room except host
-      socket.to(roomId).emit('sync-video', { action, time });
+      socket.to(roomId).emit('sync-video', { action, time, url });
     }
   });
 
-  // 4. CHAT
+  // 4. CHAT (Saves message to history before sending)
   socket.on('send-msg', ({ roomId, username, msg }) => {
-    io.to(roomId).emit('new-msg', { username, msg });
+    const room = rooms[roomId];
+    if (room) {
+      const chatData = { username, msg };
+      room.chatHistory.push(chatData); // Save every message
+      io.to(roomId).emit('new-msg', chatData);
+    }
   });
 
-  // 5. KILL ROOM IF HOST LEAVES
   socket.on('disconnecting', () => {
-    for (const roomId of socket.rooms) {
+    socket.rooms.forEach(roomId => {
       if (rooms[roomId] && rooms[roomId].hostId === socket.id) {
         io.to(roomId).emit('room-closed');
-        delete rooms[roomId];
+        delete rooms[roomId]; // ALL MESSAGES WIPED WHEN HOST LEAVES
       }
-    }
+    });
   });
 });
 
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log(`Server live on port ${PORT}`));
+server.listen(PORT, '0.0.0.0');
